@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCB Defect Detection Platform</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <style>
+    .camera-wrap { position: relative; width: 100%; max-width: 820px; margin-top: 10px; }
+    #liveVideo, #overlayCanvas { width: 100%; border-radius: 12px; border: 1px solid #274879; }
+    #overlayCanvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <main class="container">
+    <section class="hero">
+      <h1>PCB Defect Detection Platform</h1>
+      <p>Live browser camera + AI detection + reporting on the same page.</p>
+    </section>
+
+    {% if model_error %}
+      <div class="alert error">Model Error: {{ model_error }}</div>
+    {% endif %}
+    {% if firebase_error %}
+      <div class="alert warn">Firebase: {{ firebase_error }}</div>
+    {% endif %}
+
+    <section class="card actions">
+      <div>
+        <h2>Upload Image</h2>
+        <form id="uploadForm">
+          <input type="file" id="imageInput" name="image" accept="image/*" required />
+          <button type="submit">Run Full Inspection</button>
+        </form>
+      </div>
+
+      <div>
+        <h2>Live Camera (Main Page)</h2>
+        <div class="row">
+          <button id="startLiveBtn">Start Live</button>
+          <button id="stopLiveBtn">Stop Live</button>
+          <button id="captureInspectBtn">Capture + Full Inspect</button>
+        </div>
+        <p class="muted">No OpenCV popup required. Detection is shown directly here.</p>
+      </div>
+
+      <div>
+        <h2>Analytics</h2>
+        <a class="btn-link" href="{{ url_for('dashboard') }}">Open Dashboard</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Live Detection View</h2>
+      <div id="liveMetrics" class="metrics"></div>
+      <div class="camera-wrap">
+        <video id="liveVideo" autoplay muted playsinline></video>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+      <canvas id="frameCanvas" class="hidden"></canvas>
+    </section>
+
+    <section id="resultPanel" class="card hidden">
+      <h2>Full Inspection Result</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Original</h3>
+          <img id="originalImg" alt="Original" />
+        </div>
+        <div>
+          <h3>Heatmap</h3>
+          <img id="heatmapImg" alt="Heatmap" />
+        </div>
+      </div>
+
+      <div class="metrics" id="metrics"></div>
+      <h3>Detected Defects</h3>
+      <pre id="defectsText" class="output"></pre>
+      <h3>Repair Suggestions</h3>
+      <pre id="repairsText" class="output"></pre>
+      <h3>Gemini AI Explanation</h3>
+      <pre id="geminiText" class="output"></pre>
+      <div id="reportLinkWrap"></div>
+      <div id="firebaseStatus" class="muted"></div>
+    </section>
+  </main>
+
+  <script>
+    const apiBase = window.location.origin;
+
+    const uploadForm = document.getElementById('uploadForm');
+    const resultPanel = document.getElementById('resultPanel');
+
+    const video = document.getElementById('liveVideo');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const frameCanvas = document.getElementById('frameCanvas');
+    const liveMetrics = document.getElementById('liveMetrics');
+    const overlayCtx = overlayCanvas.getContext('2d');
+    const frameCtx = frameCanvas.getContext('2d');
+
+    let streamRef = null;
+    let liveTimer = null;
+    let isDetecting = false;
+
+    async function safeJson(res) {
+      const txt = await res.text();
+      try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; }
+    }
+
+    function drawBoxes(defects) {
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      overlayCtx.lineWidth = 2;
+      overlayCtx.font = '14px Segoe UI';
+
+      (defects || []).forEach((d) => {
+        const [x1, y1, x2, y2] = d.bbox || [0,0,0,0];
+        const w = x2 - x1;
+        const h = y2 - y1;
+        overlayCtx.strokeStyle = '#00e5ff';
+        overlayCtx.fillStyle = '#00e5ff';
+        overlayCtx.strokeRect(x1, y1, w, h);
+        overlayCtx.fillText(`${d.label} ${Number(d.confidence || 0).toFixed(2)}`, x1, Math.max(14, y1 - 6));
+      });
+    }
+
+    function syncCanvasSize() {
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      overlayCanvas.width = w;
+      overlayCanvas.height = h;
+      frameCanvas.width = w;
+      frameCanvas.height = h;
+    }
+
+    async function startLive() {
+      if (streamRef) return;
+      try {
+        streamRef = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = streamRef;
+        await video.play();
+        syncCanvasSize();
+
+        if (liveTimer) clearInterval(liveTimer);
+        liveTimer = setInterval(runLiveDetection, 500);
+      } catch (err) {
+        alert('Camera access failed: ' + err.message);
+      }
+    }
+
+    function stopLive() {
+      if (liveTimer) {
+        clearInterval(liveTimer);
+        liveTimer = null;
+      }
+      if (streamRef) {
+        streamRef.getTracks().forEach((t) => t.stop());
+        streamRef = null;
+      }
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      liveMetrics.innerHTML = '';
+    }
+
+    async function runLiveDetection() {
+      if (!streamRef || isDetecting) return;
+      isDetecting = true;
+
+      try {
+        frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+        const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, 'image/jpeg', 0.75));
+        if (!blob) throw new Error('Failed to capture live frame');
+
+        const formData = new FormData();
+        formData.append('image', blob, 'live_frame.jpg');
+
+        const res = await fetch(`${apiBase}/api/live-detect-upload`, {
+          method: 'POST',
+          body: formData
+        });
+        const data = await safeJson(res);
+        if (!res.ok) throw new Error(data.error || 'Live detection failed');
+
+        drawBoxes(data.defects || []);
+        liveMetrics.innerHTML = `
+          <span>Status: <b>${data.status}</b></span>
+          <span>Defects: <b>${data.defect_count}</b></span>
+          <span>Risk: <b>${data.risk_level}</b></span>
+          <span>Failure: <b>${data.failure_probability}%</b></span>
+          <span>Models: <b>${(data.models_used || []).join(', ')}</b></span>
+        `;
+      } catch (err) {
+        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Live error: <b>${err.message}</b></span>`;
+      } finally {
+        isDetecting = false;
+      }
+    }
+
+    async function runFullInspectFromBlob(blob) {
+      const formData = new FormData();
+      formData.append('image', blob, 'capture.jpg');
+
+      const res = await fetch(`${apiBase}/detect`, { method: 'POST', body: formData });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Detection failed');
+
+      resultPanel.classList.remove('hidden');
+      document.getElementById('originalImg').src = data.original_image;
+      document.getElementById('heatmapImg').src = data.heatmap_image;
+      document.getElementById('metrics').innerHTML = `
+        <span>Status: <b>${data.status}</b></span>
+        <span>Risk: <b>${data.risk_level}</b></span>
+        <span>Failure Probability: <b>${data.failure_probability}%</b></span>
+        <span>Models Used: <b>${(data.models_used || []).join(', ')}</b></span>
+      `;
+      document.getElementById('defectsText').textContent = JSON.stringify(data.defects, null, 2);
+      document.getElementById('repairsText').textContent = JSON.stringify(data.repairs, null, 2);
+      document.getElementById('geminiText').textContent = data.gemini_explanation || '';
+
+      const fileName = (data.report_path || '').split('\\').pop().split('/').pop();
+      document.getElementById('reportLinkWrap').innerHTML = fileName
+        ? `<a class="btn-link" href="${apiBase}/reports/${fileName}" target="_blank">Download PDF Report</a>`
+        : '';
+
+      const fb = data.firebase_status || {};
+      document.getElementById('firebaseStatus').textContent = fb.success
+        ? 'Firebase log: success'
+        : `Firebase log failed: ${fb.error || 'unknown error'}`;
+    }
+
+    uploadForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fileInput = document.getElementById('imageInput');
+      if (!fileInput.files.length) return;
+      try {
+        await runFullInspectFromBlob(fileInput.files[0]);
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    document.getElementById('startLiveBtn').addEventListener('click', startLive);
+    document.getElementById('stopLiveBtn').addEventListener('click', stopLive);
+
+    document.getElementById('captureInspectBtn').addEventListener('click', async () => {
+      if (!streamRef) {
+        alert('Start live camera first.');
+        return;
+      }
+      try {
+        frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+        const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, 'image/jpeg', 0.92));
+        if (!blob) throw new Error('Failed to capture frame');
+        await runFullInspectFromBlob(blob);
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    window.addEventListener('beforeunload', stopLive);
+  </script>
+</body>
+</html>

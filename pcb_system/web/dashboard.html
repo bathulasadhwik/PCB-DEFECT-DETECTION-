@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCB Analytics Dashboard</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <main class="container">
+    <section class="hero">
+      <h1>Inspection Analytics Dashboard</h1>
+      <p>Realtime dashboard from Flask API + Firebase logs.</p>
+      <a class="btn-link" href="./index.html">Back</a>
+    </section>
+
+    <section class="card">
+      <h2>Backend API URL</h2>
+      <input id="apiBaseInput" type="text" placeholder="https://your-render-backend.onrender.com" />
+      <button id="saveApiBtn">Save API URL</button>
+      <button id="testApiBtn">Test Connection</button>
+      <button id="refreshBtn">Refresh</button>
+      <p id="apiStatus" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>Total Scans</h2>
+      <div id="totalScans" class="big-metric">0</div>
+    </section>
+
+    <section class="card chart-grid">
+      <div>
+        <h2>Defect Distribution</h2>
+        <canvas id="defectChart"></canvas>
+      </div>
+      <div>
+        <h2>Risk Levels</h2>
+        <canvas id="riskChart"></canvas>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recent Reports</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Status</th>
+              <th>Risk</th>
+              <th>Report</th>
+            </tr>
+          </thead>
+          <tbody id="recentReportsBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const getApiBase = () => (localStorage.getItem('PCB_API_BASE') || '').replace(/\/$/, '');
+    const apiInput = document.getElementById('apiBaseInput');
+    const apiStatus = document.getElementById('apiStatus');
+    apiInput.value = getApiBase() || 'https://your-render-backend.onrender.com';
+
+    function assertApiBase() {
+      const base = getApiBase();
+      if (!base) throw new Error('Backend API URL is empty.');
+      if (location.protocol === 'https:' && base.startsWith('http://')) {
+        throw new Error('HTTPS page cannot call HTTP backend. Use HTTPS backend URL.');
+      }
+      return base;
+    }
+
+    async function safeJson(res) {
+      const txt = await res.text();
+      try {
+        return JSON.parse(txt);
+      } catch {
+        return { error: txt || 'Non-JSON response from backend' };
+      }
+    }
+
+    let defectChart;
+    let riskChart;
+
+    document.getElementById('saveApiBtn').addEventListener('click', () => {
+      const val = apiInput.value.trim().replace(/\/$/, '');
+      localStorage.setItem('PCB_API_BASE', val);
+      apiStatus.textContent = `Saved API: ${val}`;
+      loadDashboard();
+    });
+    document.getElementById('testApiBtn').addEventListener('click', async () => {
+      try {
+        const base = assertApiBase();
+        const res = await fetch(`${base}/health`);
+        const data = await safeJson(res);
+        if (!res.ok) throw new Error(data.error || 'Health check failed');
+        apiStatus.textContent = `Connected: model_loaded=${data.model_loaded}, firebase_enabled=${data.firebase_enabled}`;
+      } catch (err) {
+        apiStatus.textContent = `Connection failed: ${err.message}`;
+      }
+    });
+    document.getElementById('refreshBtn').addEventListener('click', loadDashboard);
+
+    function renderCharts(defectData, riskData) {
+      const defectCtx = document.getElementById('defectChart');
+      const riskCtx = document.getElementById('riskChart');
+
+      if (defectChart) defectChart.destroy();
+      if (riskChart) riskChart.destroy();
+
+      defectChart = new Chart(defectCtx, {
+        type: 'bar',
+        data: {
+          labels: Object.keys(defectData || {}),
+          datasets: [{
+            label: 'Defect Count',
+            data: Object.values(defectData || {}),
+            backgroundColor: 'rgba(55, 211, 157, 0.7)',
+            borderColor: 'rgba(55, 211, 157, 1)',
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#d6e2ff' } } },
+          scales: {
+            x: { ticks: { color: '#b8c7e8' }, grid: { color: '#233152' } },
+            y: { ticks: { color: '#b8c7e8' }, grid: { color: '#233152' } }
+          }
+        }
+      });
+
+      riskChart = new Chart(riskCtx, {
+        type: 'pie',
+        data: {
+          labels: Object.keys(riskData || {}),
+          datasets: [{
+            data: Object.values(riskData || {}),
+            backgroundColor: ['#38bdf8', '#f59e0b', '#ef4444', '#64748b']
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#d6e2ff' } } }
+        }
+      });
+    }
+
+    function renderReports(rows) {
+      const tbody = document.getElementById('recentReportsBody');
+      tbody.innerHTML = '';
+      (rows || []).forEach((row) => {
+        const tr = document.createElement('tr');
+        const reportFile = row.report_file || '';
+        const base = getApiBase();
+        tr.innerHTML = `
+          <td>${row.timestamp || ''}</td>
+          <td>${row.status || ''}</td>
+          <td>${row.risk_level || ''}</td>
+          <td>${reportFile ? `<a href="${base}/reports/${reportFile}" target="_blank">Open</a>` : 'N/A'}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadDashboard() {
+      try {
+        const base = assertApiBase();
+        const res = await fetch(`${base}/api/dashboard`);
+        const data = await safeJson(res);
+        if (!res.ok) throw new Error(data.error || 'Failed to load dashboard');
+
+        document.getElementById('totalScans').textContent = data.total_scans || 0;
+        renderCharts(data.defect_distribution || {}, data.risk_distribution || {});
+        renderReports(data.recent_reports || []);
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    loadDashboard();
+  </script>
+</body>
+</html>

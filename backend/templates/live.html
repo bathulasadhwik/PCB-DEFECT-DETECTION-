@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCB Inspector - Live Detection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+
+  <nav class="top-nav">
+    <h1><i class="fas fa-video"></i> Live PCB Detection</h1>
+    <div class="nav-links">
+      <a href="{{ url_for('index') }}">Upload Inspection</a>
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <span>Realtime Stream Mode</span>
+    </div>
+  </nav>
+
+  <main class="container">
+    {% if model_error %}
+      <div class="alert error">Model Error: {{ model_error }}</div>
+    {% endif %}
+    {% if firebase_error %}
+      <div class="alert warn">Firebase: {{ firebase_error }}</div>
+    {% endif %}
+
+    <section class="glass-panel">
+      <h3 class="panel-title"><i class="fas fa-sliders-h"></i> Live Detection Controls</h3>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="modelMode"><i class="fas fa-layer-group"></i> Inference Mode</label>
+          <select id="modelMode">
+            <option value="all">All loaded models (more coverage)</option>
+            <option value="single">Single model (faster)</option>
+          </select>
+          <small class="muted">All mode runs every available model; Single runs only the selected key below.</small>
+        </div>
+        <div class="form-group">
+          <label for="modelKey"><i class="fas fa-robot"></i> Preferred Model Key</label>
+          <select id="modelKey">
+            {% if model_catalog %}
+              {% for m in model_catalog %}
+                <option value="{{ m.key }}">{{ m.key }}</option>
+              {% endfor %}
+            {% else %}
+              <option value="model">model</option>
+            {% endif %}
+          </select>
+          <small class="muted">Model key used in Single mode.</small>
+        </div>
+        <div class="form-group">
+          <label for="confThreshold"><i class="fas fa-bullseye"></i> Confidence Threshold</label>
+          <input id="confThreshold" type="number" step="0.01" min="0.01" max="0.99" value="0.15">
+          <small class="muted">Higher value = fewer detections.</small>
+        </div>
+        <div class="form-group">
+          <label for="iouThreshold"><i class="fas fa-crosshairs"></i> IoU Threshold</label>
+          <input id="iouThreshold" type="number" step="0.01" min="0.05" max="0.95" value="0.45">
+          <small class="muted">Overlap filter for duplicate boxes.</small>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <label style="display:flex; align-items:center; gap:8px; color: var(--text-dim);">
+          <input id="logLiveDetections" type="checkbox" checked />
+          Log live detections to dashboard
+        </label>
+      </div>
+    </section>
+
+    <section class="glass-panel">
+      <h3 class="panel-title"><i class="fas fa-camera"></i> Camera Stream</h3>
+      <div class="row">
+        <button id="startLiveBtn">Start Live</button>
+        <button id="stopLiveBtn" class="btn-ghost">Stop Live</button>
+      </div>
+      <div id="liveMetrics" class="metrics"></div>
+      <div class="camera-wrap">
+        <video id="liveVideo" autoplay muted playsinline></video>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+      <canvas id="frameCanvas" class="hidden"></canvas>
+    </section>
+  </main>
+
+  <script>
+    const apiBase = window.location.origin;
+    const video = document.getElementById('liveVideo');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const frameCanvas = document.getElementById('frameCanvas');
+    const liveMetrics = document.getElementById('liveMetrics');
+    const overlayCtx = overlayCanvas.getContext('2d');
+    const frameCtx = frameCanvas.getContext('2d');
+    const logToggle = document.getElementById('logLiveDetections');
+
+    let streamRef = null;
+    let liveTimer = null;
+    let isDetecting = false;
+    let lastLogAt = 0;
+
+    function getConfig() {
+      const conf = Number(document.getElementById('confThreshold').value);
+      const iou = Number(document.getElementById('iouThreshold').value);
+      const modelMode = document.getElementById('modelMode').value || 'all';
+      const modelKey = (document.getElementById('modelKey').value || '').trim();
+      return {
+        conf_threshold: Number.isFinite(conf) ? conf : 0.15,
+        iou_threshold: Number.isFinite(iou) ? iou : 0.45,
+        model_mode: modelMode,
+        model_key: modelKey || 'model'
+      };
+    }
+
+    async function safeJson(res) {
+      const txt = await res.text();
+      try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; }
+    }
+
+    function drawBoxes(defects) {
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      overlayCtx.lineWidth = 2;
+      overlayCtx.font = '14px Segoe UI';
+      (defects || []).forEach((d) => {
+        const [x1, y1, x2, y2] = d.bbox || [0, 0, 0, 0];
+        overlayCtx.strokeStyle = '#00e5ff';
+        overlayCtx.fillStyle = '#00e5ff';
+        overlayCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        overlayCtx.fillText(`${d.label} ${Number(d.confidence || 0).toFixed(2)}`, x1, Math.max(14, y1 - 6));
+      });
+    }
+
+    function syncCanvasSize() {
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      overlayCanvas.width = w;
+      overlayCanvas.height = h;
+      frameCanvas.width = w;
+      frameCanvas.height = h;
+    }
+
+    async function startLive() {
+      if (streamRef) return;
+      try {
+        streamRef = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = streamRef;
+        await video.play();
+        syncCanvasSize();
+        if (liveTimer) clearInterval(liveTimer);
+        liveTimer = setInterval(runLiveDetection, 500);
+      } catch (err) {
+        alert('Camera access failed: ' + err.message);
+      }
+    }
+
+    function stopLive() {
+      if (liveTimer) clearInterval(liveTimer);
+      liveTimer = null;
+      if (streamRef) streamRef.getTracks().forEach((t) => t.stop());
+      streamRef = null;
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      liveMetrics.innerHTML = '';
+    }
+
+    async function runLiveDetection() {
+      if (!streamRef || isDetecting) return;
+      isDetecting = true;
+      try {
+        frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+        const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, 'image/jpeg', 0.75));
+        if (!blob) throw new Error('Failed to capture live frame');
+
+        const formData = new FormData();
+        formData.append('image', blob, 'live_frame.jpg');
+        const cfg = getConfig();
+        formData.append('conf_threshold', String(cfg.conf_threshold));
+        formData.append('iou_threshold', String(cfg.iou_threshold));
+        formData.append('model_mode', cfg.model_mode);
+        formData.append('model_key', cfg.model_key);
+
+        const shouldLog = logToggle.checked && (Date.now() - lastLogAt >= 5000);
+        formData.append('log_event', shouldLog ? '1' : '0');
+        if (shouldLog) lastLogAt = Date.now();
+
+        const res = await fetch(`${apiBase}/api/live-detect-upload`, { method: 'POST', body: formData });
+        const data = await safeJson(res);
+        if (!res.ok) throw new Error(data.error || 'Live detection failed');
+
+        drawBoxes(data.defects || []);
+        const logState = data.live_logged ? (data.firebase_status?.success ? 'logged' : 'local-fallback') : 'off';
+        liveMetrics.innerHTML = `
+          <span>Status: <b>${data.status}</b></span>
+          <span>Defects: <b>${data.defect_count}</b></span>
+          <span>Risk: <b>${data.risk_level}</b></span>
+          <span>Failure: <b>${data.failure_probability}%</b></span>
+          <span>Models: <b>${(data.models_used || []).join(', ')}</b></span>
+          <span>Dashboard Log: <b>${logState}</b></span>
+        `;
+      } catch (err) {
+        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Live error: <b>${err.message}</b></span>`;
+      } finally {
+        isDetecting = false;
+      }
+    }
+
+    document.getElementById('startLiveBtn').addEventListener('click', startLive);
+    document.getElementById('stopLiveBtn').addEventListener('click', stopLive);
+    window.addEventListener('beforeunload', stopLive);
+  </script>
+</body>
+</html>

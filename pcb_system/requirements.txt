@@ -1,0 +1,9 @@
+Flask==3.0.3
+opencv-python==4.10.0.84
+ultralytics==8.3.0
+numpy==1.26.4
+reportlab==4.2.2
+firebase-admin==6.5.0
+google-generativeai==0.8.3
+python-dotenv==1.0.1
+gunicorn==22.0.0

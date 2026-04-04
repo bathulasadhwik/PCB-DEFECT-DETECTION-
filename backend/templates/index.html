@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCB Inspector - Upload Inspection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+
+  <nav class="top-nav">
+    <h1><i class="fas fa-microchip"></i> PCB Inspector</h1>
+    <div class="nav-links">
+      <a href="{{ url_for('live_page') }}">Live Detection</a>
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <span>Upload Inspection Mode</span>
+    </div>
+  </nav>
+
+  <main class="container">
+    <section class="hero glass-panel">
+      <h2>Analyze Circuit Boards</h2>
+    </section>
+
+    {% if model_error %}
+      <div class="alert error">Model Error: {{ model_error }}</div>
+    {% endif %}
+    {% if firebase_error %}
+      <div class="alert warn">Firebase: {{ firebase_error }}</div>
+    {% endif %}
+
+    <section class="glass-panel">
+      <h3 class="panel-title"><i class="fas fa-sliders-h"></i> Inspection Controls</h3>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="modelMode"><i class="fas fa-layer-group"></i> Inference Mode</label>
+          <select id="modelMode">
+            <option value="all">All loaded models (more coverage)</option>
+            <option value="single">Single model (faster)</option>
+          </select>
+          <small class="muted">All mode runs every available model; Single runs only the selected key below.</small>
+        </div>
+        <div class="form-group">
+          <label for="modelKey"><i class="fas fa-robot"></i> Preferred Model Key</label>
+          <select id="modelKey">
+            {% if model_catalog %}
+              {% for m in model_catalog %}
+                <option value="{{ m.key }}">{{ m.key }}</option>
+              {% endfor %}
+            {% else %}
+              <option value="model">model</option>
+            {% endif %}
+          </select>
+          <small class="muted">Model key used in Single mode. Available keys are loaded from backend at runtime.</small>
+        </div>
+        <div class="form-group">
+          <label for="confThreshold"><i class="fas fa-bullseye"></i> Confidence Threshold</label>
+          <input id="confThreshold" type="number" step="0.01" min="0.01" max="0.99" value="0.25">
+          <small class="muted">Higher value = fewer detections, lower false positives.</small>
+        </div>
+        <div class="form-group">
+          <label for="iouThreshold"><i class="fas fa-crosshairs"></i> IoU Threshold</label>
+          <input id="iouThreshold" type="number" step="0.01" min="0.05" max="0.95" value="0.45">
+          <small class="muted">Controls overlap filtering for boxes. Typical range is 0.30 to 0.60.</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="glass-panel">
+      <h3 class="panel-title"><i class="fas fa-cloud-upload-alt"></i> Upload & Full Inspection</h3>
+      <form id="uploadForm">
+        <div class="upload-area" id="dropZone">
+          <i class="fas fa-image"></i>
+          <h4 id="uploadText">Drag & Drop Image Here</h4>
+          <p>or click to browse your files</p>
+          <input type="file" id="imageInput" name="image" accept="image/*" required />
+        </div>
+        <button type="submit" class="btn-submit">Run Full Inspection <i class="fas fa-arrow-right"></i></button>
+      </form>
+      <div id="runStatus" class="muted" style="margin-top:10px;"></div>
+    </section>
+
+    <section id="resultPanel" class="glass-panel hidden">
+      <h3 class="panel-title"><i class="fas fa-chart-line"></i> Full Inspection Result</h3>
+      <div id="statusBadgeWrap"></div>
+      <div class="grid-3">
+        <div class="img-card">
+          <div class="img-card-header">Original</div>
+          <img id="originalImg" alt="Original" />
+        </div>
+        <div class="img-card">
+          <div class="img-card-header">Detection</div>
+          <img id="detectionImg" alt="Detection" />
+        </div>
+        <div class="img-card">
+          <div class="img-card-header">Heatmap</div>
+          <img id="heatmapImg" alt="Heatmap" />
+        </div>
+      </div>
+
+      <div class="metrics" id="metrics"></div>
+      <h4>All Loaded Models - Full Inspection Result</h4>
+      <div id="allModelsFullResults" class="grid-3"></div>
+      <h4>Model Inspection Details</h4>
+      <pre id="modelInspectionText" class="output"></pre>
+      <h4>Detected Defects</h4>
+      <pre id="defectsText" class="output"></pre>
+      <h4>Repair Suggestions</h4>
+      <pre id="repairsText" class="output"></pre>
+      <h4>Explanation</h4>
+      <pre id="geminiText" class="output"></pre>
+      <div id="reportLinkWrap"></div>
+      <div id="firebaseStatus" class="muted"></div>
+    </section>
+  </main>
+
+  <script>
+    const apiBase = window.location.origin;
+
+    const uploadForm = document.getElementById('uploadForm');
+    const resultPanel = document.getElementById('resultPanel');
+    const dropZone = document.getElementById('dropZone');
+    const imageInput = document.getElementById('imageInput');
+    const uploadText = document.getElementById('uploadText');
+    const runStatus = document.getElementById('runStatus');
+    const submitBtn = uploadForm.querySelector('button[type="submit"]');
+    const allModelsFullResults = document.getElementById('allModelsFullResults');
+
+    function getConfig() {
+      const conf = Number(document.getElementById('confThreshold').value);
+      const iou = Number(document.getElementById('iouThreshold').value);
+      const modelMode = document.getElementById('modelMode').value || 'all';
+      const modelKey = (document.getElementById('modelKey').value || '').trim();
+      return {
+        conf_threshold: Number.isFinite(conf) ? conf : 0.25,
+        iou_threshold: Number.isFinite(iou) ? iou : 0.45,
+        model_mode: modelMode,
+        model_key: modelKey || 'model'
+      };
+    }
+
+    async function safeJson(res) {
+      const txt = await res.text();
+      try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; }
+    }
+
+    async function runFullInspectFromBlob(blob) {
+      const formData = new FormData();
+      formData.append('image', blob, 'capture.jpg');
+      const cfg = getConfig();
+      formData.append('conf_threshold', String(cfg.conf_threshold));
+      formData.append('iou_threshold', String(cfg.iou_threshold));
+      formData.append('model_mode', cfg.model_mode);
+      formData.append('model_key', cfg.model_key);
+
+      const res = await fetch(`${apiBase}/detect`, { method: 'POST', body: formData });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Detection failed');
+
+      resultPanel.classList.remove('hidden');
+      document.getElementById('originalImg').src = data.original_image;
+      document.getElementById('detectionImg').src = data.detection_image || data.original_image;
+      document.getElementById('heatmapImg').src = data.heatmap_image;
+      document.getElementById('statusBadgeWrap').innerHTML = data.status === 'OK'
+        ? `<div class="verdict-badge verdict-good"><i class="fas fa-check-circle"></i> PASSED: NO DEFECTS</div>`
+        : `<div class="verdict-badge verdict-bad"><i class="fas fa-times-circle"></i> FAILED: DEFECTS FOUND</div>`;
+      document.getElementById('metrics').innerHTML = `
+        <span>Status: <b>${data.status}</b></span>
+        <span>Risk: <b>${data.risk_level}</b></span>
+        <span>Failure Probability: <b>${data.failure_probability}%</b></span>
+        <span>Conf: <b>${data?.config_used?.conf_threshold ?? '-'}</b></span>
+        <span>IoU: <b>${data?.config_used?.iou_threshold ?? '-'}</b></span>
+        <span>Mode: <b>${data?.config_used?.model_mode ?? '-'}</b></span>
+        <span>Model Key: <b>${data?.config_used?.model_key ?? '-'}</b></span>
+        <span>Models Used: <b>${(data.models_used || []).join(', ')}</b></span>
+      `;
+
+      const modelCards = (data.all_models_full_results || []).map((m) => `
+        <div class="img-card">
+          <div class="img-card-header">${m.model_key}</div>
+          ${m.annotated_image ? `<img src="${m.annotated_image}" alt="${m.model_key} detection" />` : ''}
+          <div class="metrics" style="padding:10px;">
+            <span>Status: <b>${m.status}</b></span>
+            <span>Defects: <b>${m.defect_count}</b></span>
+            <span>Risk: <b>${m.risk_level}</b></span>
+            <span>Failure: <b>${m.failure_probability}%</b></span>
+          </div>
+          <pre class="output" style="margin:10px;">${JSON.stringify(m.defects || [], null, 2)}</pre>
+        </div>
+      `).join('');
+      allModelsFullResults.innerHTML = modelCards || '<div class="muted">No per-model results available.</div>';
+
+      document.getElementById('modelInspectionText').textContent =
+        JSON.stringify(data.model_inspection_details || {}, null, 2);
+      document.getElementById('defectsText').textContent = JSON.stringify(data.defects, null, 2);
+      document.getElementById('repairsText').textContent = JSON.stringify(data.repairs, null, 2);
+      document.getElementById('geminiText').textContent = data.gemini_explanation || '';
+
+      const fileName = (data.report_path || '').split('\\').pop().split('/').pop();
+      document.getElementById('reportLinkWrap').innerHTML = fileName
+        ? `<a class="btn-link" href="${apiBase}/reports/${fileName}" target="_blank">Download PDF Report</a>`
+        : '';
+
+      const fb = data.firebase_status || {};
+      document.getElementById('firebaseStatus').textContent = fb.success
+        ? 'Firebase log: success'
+        : `Firebase log failed: ${fb.error || 'unknown error'}`;
+      runStatus.textContent = 'Inspection completed and logged.';
+    }
+
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach((eventName) => {
+      dropZone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    });
+
+    ['dragenter', 'dragover'].forEach((eventName) => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.add('dragover'));
+    });
+
+    ['dragleave', 'drop'].forEach((eventName) => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'));
+    });
+
+    dropZone.addEventListener('click', () => imageInput.click());
+    dropZone.addEventListener('drop', (e) => {
+      const files = e.dataTransfer?.files;
+      if (!files || !files.length) return;
+      imageInput.files = files;
+      uploadText.textContent = `Selected: ${files[0].name}`;
+    });
+
+    imageInput.addEventListener('change', () => {
+      if (imageInput.files.length > 0) {
+        uploadText.textContent = `Selected: ${imageInput.files[0].name}`;
+      }
+    });
+
+    uploadForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!imageInput.files.length) return;
+      try {
+        runStatus.textContent = 'Running inspection...';
+        submitBtn.disabled = true;
+        await runFullInspectFromBlob(imageInput.files[0]);
+      } catch (err) {
+        runStatus.textContent = `Inspection failed: ${err.message}`;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCB Analytics Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <nav class="top-nav">
+    <h1><i class="fas fa-chart-pie"></i> PCB Analytics</h1>
+    <div class="nav-links">
+      <a href="./index.html">Upload Inspection</a>
+      <a href="./live.html">Live Detection</a>
+      <span>Operational Dashboard</span>
+    </div>
+  </nav>
+
+  <main class="container">
+    <section class="hero glass-panel">
+      <h1>Inspection Analytics Dashboard</h1>
+      <p>Production trend visibility for defects, risk, and report history.</p>
+    </section>
+    <section class="glass-panel"><h2>Total Scans</h2><div id="totalScans" class="big-metric">0</div></section>
+    <section class="glass-panel chart-grid">
+      <div><h2>Defect Distribution</h2><canvas id="defectChart"></canvas></div>
+      <div><h2>Risk Levels</h2><canvas id="riskChart"></canvas></div>
+    </section>
+    <section class="glass-panel">
+      <h2>Recent Reports</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Timestamp</th><th>Source</th><th>Status</th><th>Risk</th><th>Report</th></tr></thead>
+          <tbody id="recentReportsBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="./env.js"></script>
+  <script>
+    const API_BASE = ((window.APP_ENV && window.APP_ENV.API_BASE_URL) || '').replace(/\/$/, '');
+    function assertApiBase() { if (!API_BASE) throw new Error('Set API_BASE_URL in frontend/env.js'); return API_BASE; }
+    async function safeJson(res) { const txt = await res.text(); try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; } }
+    let defectChart, riskChart;
+    function renderCharts(defectData, riskData) {
+      const defectCtx = document.getElementById('defectChart');
+      const riskCtx = document.getElementById('riskChart');
+      if (defectChart) defectChart.destroy();
+      if (riskChart) riskChart.destroy();
+      defectChart = new Chart(defectCtx, { type: 'bar', data: { labels: Object.keys(defectData || {}), datasets: [{ label: 'Defect Count', data: Object.values(defectData || {}), backgroundColor: 'rgba(55, 211, 157, 0.7)', borderColor: 'rgba(55, 211, 157, 1)', borderWidth: 1 }] } });
+      riskChart = new Chart(riskCtx, { type: 'pie', data: { labels: Object.keys(riskData || {}), datasets: [{ data: Object.values(riskData || {}), backgroundColor: ['#38bdf8', '#f59e0b', '#ef4444', '#64748b'] }] } });
+    }
+    function renderReports(rows) {
+      const tbody = document.getElementById('recentReportsBody');
+      tbody.innerHTML = '';
+      (rows || []).forEach((row) => {
+        const tr = document.createElement('tr');
+        const reportFile = row.report_file || '';
+        tr.innerHTML = `<td>${row.timestamp || ''}</td><td>${row.source || ''}</td><td>${row.status || ''}</td><td>${row.risk_level || ''}</td><td>${reportFile ? `<a href="${API_BASE}/reports/${reportFile}" target="_blank">Open</a>` : 'N/A'}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+    async function loadDashboard() {
+      const base = assertApiBase();
+      const res = await fetch(`${base}/api/dashboard`);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Failed to load dashboard');
+      document.getElementById('totalScans').textContent = data.total_scans || 0;
+      renderCharts(data.defect_distribution || {}, data.risk_distribution || {});
+      renderReports(data.recent_reports || []);
+    }
+    loadDashboard().catch((err) => alert(err.message));
+  </script>
+</body>
+</html>

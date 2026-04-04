@@ -1,0 +1,7 @@
+# Local env and virtual env
+.venv/
+pcb_system/.env
+pcb_system/serviceAccountKey.json
+pcb_system/.env
+backend/.env
+.venv/
