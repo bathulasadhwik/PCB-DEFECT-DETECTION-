@@ -190,7 +190,17 @@
     ['dragenter', 'dragover'].forEach((e) => dropZone.addEventListener(e, () => dropZone.classList.add('dragover')));
     ['dragleave', 'drop'].forEach((e) => dropZone.addEventListener(e, () => dropZone.classList.remove('dragover')));
     dropZone.addEventListener('click', () => imageInput.click());
-    dropZone.addEventListener('drop', (e) => { const files = e.dataTransfer?.files; if (!files || !files.length) return; imageInput.files = files; uploadText.textContent = `Selected: ${files[0].name}`; });
+    dropZone.addEventListener('drop', (e) => {
+      const files = e.dataTransfer?.files;
+      if (!files || !files.length) return;
+      // Create a DataTransfer object to properly assign files
+      const dataTransfer = new DataTransfer();
+      for (let i = 0; i < files.length; i++) {
+        dataTransfer.items.add(files[i]);
+      }
+      imageInput.files = dataTransfer.files;
+      uploadText.textContent = `Selected: ${files[0].name}`;
+    });
     imageInput.addEventListener('change', () => { if (imageInput.files.length > 0) uploadText.textContent = `Selected: ${imageInput.files[0].name}`; });
     uploadForm.addEventListener('submit', async (e) => {
       e.preventDefault();

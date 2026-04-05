@@ -254,7 +254,12 @@
     dropZone.addEventListener('drop', (e) => {
       const files = e.dataTransfer?.files;
       if (!files || !files.length) return;
-      imageInput.files = files;
+      // Create a DataTransfer object to properly assign files
+      const dataTransfer = new DataTransfer();
+      for (let i = 0; i < files.length; i++) {
+        dataTransfer.items.add(files[i]);
+      }
+      imageInput.files = dataTransfer.files;
       uploadText.textContent = `Selected: ${files[0].name}`;
     });
 
