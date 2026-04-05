@@ -1,1 +1,2 @@
-window.APP_ENV = { API_BASE_URL: "http://localhost:5000/" };
+// API Base URL for backend server
+const API_BASE = 'https://pcb-detection-backend.onrender.com';
