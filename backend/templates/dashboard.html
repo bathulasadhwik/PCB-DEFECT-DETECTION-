@@ -34,6 +34,28 @@
       <div class="big-metric">{{ analytics.total_scans }}</div>
     </section>
 
+    <section class="glass-panel">
+      <h2>Quality Metrics</h2>
+      <div class="metric-grid">
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.quality_metrics.yield_rate }}%</span>
+          <span class="metric-label">Yield Rate</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.quality_metrics.average_failure_probability }}%</span>
+          <span class="metric-label">Avg Failure Prob</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.quality_metrics.average_defect_density }}</span>
+          <span class="metric-label">Avg Defects/Board</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.quality_metrics.total_defects }}</span>
+          <span class="metric-label">Total Defects</span>
+        </div>
+      </div>
+    </section>
+
     <section class="glass-panel chart-grid">
       <div>
         <h2>Defect Distribution</h2>
@@ -46,6 +68,11 @@
     </section>
 
     <section class="glass-panel">
+      <h2>Inspection Status</h2>
+      <canvas id="statusChart"></canvas>
+    </section>
+
+    <section class="glass-panel">
       <h2>Recent Reports</h2>
       <div class="table-wrap">
         <table>
@@ -55,6 +82,7 @@
               <th>Source</th>
               <th>Status</th>
               <th>Risk</th>
+              <th>Defects</th>
               <th>Report</th>
             </tr>
           </thead>
@@ -65,6 +93,7 @@
               <td>{{ row.source }}</td>
               <td>{{ row.status }}</td>
               <td>{{ row.risk_level }}</td>
+              <td>{{ row.defect_count }}</td>
               <td>
                 {% if row.report_file %}
                   <a href="/reports/{{ row.report_file }}" target="_blank">Open</a>
@@ -83,6 +112,7 @@
   <script>
     const defectData = {{ analytics.defect_distribution | tojson }};
     const riskData = {{ analytics.risk_distribution | tojson }};
+    const statusData = {{ analytics.status_distribution | tojson }};
 
     const defectCtx = document.getElementById('defectChart');
     new Chart(defectCtx, {
@@ -98,6 +128,63 @@
         }]
       },
       options: {
+        responsive: true,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+
+    const riskCtx = document.getElementById('riskChart');
+    new Chart(riskCtx, {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(riskData),
+        datasets: [{
+          data: Object.values(riskData),
+          backgroundColor: [
+            'rgba(75, 192, 192, 0.8)',  // LOW - green
+            'rgba(255, 206, 86, 0.8)',  // MEDIUM - yellow
+            'rgba(255, 99, 132, 0.8)',  // HIGH - red
+            'rgba(128, 128, 128, 0.8)'  // UNKNOWN - gray
+          ],
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'bottom' }
+        }
+      }
+    });
+
+    const statusCtx = document.getElementById('statusChart');
+    new Chart(statusCtx, {
+      type: 'pie',
+      data: {
+        labels: Object.keys(statusData),
+        datasets: [{
+          data: Object.values(statusData),
+          backgroundColor: [
+            'rgba(75, 192, 192, 0.8)',  // PASS - green
+            'rgba(255, 99, 132, 0.8)',  // FAIL - red
+            'rgba(128, 128, 128, 0.8)'  // UNKNOWN - gray
+          ],
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'bottom' }
+        }
+      }
+    });
+  </script>
         responsive: true,
         plugins: { legend: { labels: { color: '#d6e2ff' } } },
         scales: {

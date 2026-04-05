@@ -41,7 +41,7 @@ class YOLODetector:
 
         if not self.models:
             raise FileNotFoundError(
-                "No YOLO model could be loaded. Expected one or more model files in pcb_system/yolo_model."
+                "No YOLO model could be loaded. Expected one or more model files in backend/yolo_model."
             )
 
         self.default_model_key = os.getenv("YOLO_MODEL_KEY", "model").strip() or "model"
@@ -57,7 +57,7 @@ class YOLODetector:
     @staticmethod
     def _resolve_model_paths(model_path: str = None) -> Dict[str, str]:
         module_file = Path(__file__).resolve()
-        app_dir = module_file.parent.parent  # .../pcb_system
+        app_dir = module_file.parent.parent  # .../backend
         workspace_dir = app_dir.parent        # .../PCB DETECTION
 
         candidates = {

@@ -41,5 +41,7 @@ def generate_heatmap_overlay(image: np.ndarray, defects: List[Dict], alpha: floa
 
 def save_heatmap(path: str, heatmap_image: np.ndarray) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    cv2.imwrite(path, heatmap_image)
+    ok = cv2.imwrite(path, heatmap_image)
+    if not ok or not os.path.exists(path):
+        raise IOError(f"Failed to write heatmap image: {path}")
     return path

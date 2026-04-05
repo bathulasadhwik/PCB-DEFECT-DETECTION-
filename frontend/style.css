@@ -262,14 +262,24 @@ button:hover,
   width: 100%;
   max-width: 920px;
   margin-top: 10px;
+  aspect-ratio: 16 / 9;
+  min-height: 280px;
 }
 
 #liveVideo,
 #overlayCanvas {
   width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
   border-radius: 12px;
   border: 1px solid rgba(0, 240, 255, 0.3);
+}
+
+#liveVideo {
   background: #070707;
+  position: relative;
+  z-index: 1;
 }
 
 #overlayCanvas {
@@ -277,6 +287,8 @@ button:hover,
   left: 0;
   top: 0;
   pointer-events: none;
+  background: transparent;
+  z-index: 2;
 }
 
 .grid-2 {

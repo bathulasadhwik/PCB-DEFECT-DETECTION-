@@ -1,0 +1,13 @@
+firebase-functions>=0.5.0
+flask>=2.0.0
+werkzeug>=2.0.0
+opencv-python-headless
+ultralytics
+torch
+torchvision
+pillow
+numpy
+reportlab
+google-generativeai
+python-dotenv
+flask-cors

@@ -27,13 +27,15 @@
     {% if model_error %}
       <div class="alert error">Model Error: {{ model_error }}</div>
     {% endif %}
-    {% if firebase_error %}
-      <div class="alert warn">Firebase: {{ firebase_error }}</div>
-    {% endif %}
 
     <section class="glass-panel">
       <h3 class="panel-title"><i class="fas fa-sliders-h"></i> Live Detection Controls</h3>
       <div class="form-grid">
+        <div class="form-group">
+          <label for="pcbName"><i class="fas fa-tag"></i> PCB Name</label>
+          <input id="pcbName" type="text" maxlength="120" placeholder="Example: Control PCB v2">
+          <small class="muted">Saved in local logs and included in the session PDF report.</small>
+        </div>
         <div class="form-group">
           <label for="modelMode"><i class="fas fa-layer-group"></i> Inference Mode</label>
           <select id="modelMode">
@@ -69,7 +71,7 @@
       <div class="row" style="margin-top: 12px;">
         <label style="display:flex; align-items:center; gap:8px; color: var(--text-dim);">
           <input id="logLiveDetections" type="checkbox" checked />
-          Log live detections to dashboard
+          Generate final 1-minute session report
         </label>
       </div>
     </section>
@@ -80,7 +82,10 @@
         <button id="startLiveBtn">Start Live</button>
         <button id="stopLiveBtn" class="btn-ghost">Stop Live</button>
       </div>
+      <div id="cameraStatus" class="muted" style="margin-top:8px;"></div>
       <div id="liveMetrics" class="metrics"></div>
+      <div id="liveReportLink" class="row"></div>
+      <pre id="liveSessionSummary" class="output hidden"></pre>
       <div class="camera-wrap">
         <video id="liveVideo" autoplay muted playsinline></video>
         <canvas id="overlayCanvas"></canvas>
@@ -91,35 +96,120 @@
 
   <script>
     const apiBase = window.location.origin;
+    const SESSION_SECONDS = 60;
+    const FRAME_INTERVAL_MS = 500;
+    const AGGREGATE_IOU = 0.6;
+
     const video = document.getElementById('liveVideo');
     const overlayCanvas = document.getElementById('overlayCanvas');
     const frameCanvas = document.getElementById('frameCanvas');
     const liveMetrics = document.getElementById('liveMetrics');
+    const liveReportLink = document.getElementById('liveReportLink');
+    const liveSessionSummary = document.getElementById('liveSessionSummary');
+    const cameraStatus = document.getElementById('cameraStatus');
     const overlayCtx = overlayCanvas.getContext('2d');
     const frameCtx = frameCanvas.getContext('2d');
     const logToggle = document.getElementById('logLiveDetections');
 
     let streamRef = null;
     let liveTimer = null;
+    let sessionTimer = null;
     let isDetecting = false;
-    let lastLogAt = 0;
+    let sessionFinalizing = false;
+    let sessionActive = false;
+    let sessionStartMs = 0;
+    let sessionEndMs = 0;
+    let sessionFrames = 0;
+    let sessionHits = 0;
+    let latestFrameBlob = null;
+    let sessionDefects = [];
 
     function getConfig() {
       const conf = Number(document.getElementById('confThreshold').value);
       const iou = Number(document.getElementById('iouThreshold').value);
       const modelMode = document.getElementById('modelMode').value || 'all';
       const modelKey = (document.getElementById('modelKey').value || '').trim();
+      const pcbName = (document.getElementById('pcbName').value || '').trim();
       return {
         conf_threshold: Number.isFinite(conf) ? conf : 0.15,
         iou_threshold: Number.isFinite(iou) ? iou : 0.45,
         model_mode: modelMode,
-        model_key: modelKey || 'model'
+        model_key: modelKey || 'model',
+        pcb_name: pcbName || 'Unnamed PCB',
       };
+    }
+
+    function shortError(msg) {
+      const raw = String(msg || '').replace(/\s+/g, ' ').trim();
+      if (!raw) return 'Unknown error';
+      if (raw.toLowerCase().startsWith('<!doctype html')) {
+        return 'Backend crashed while processing. Check backend terminal, then restart backend.';
+      }
+      return raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
     }
 
     async function safeJson(res) {
       const txt = await res.text();
-      try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; }
+      try { return JSON.parse(txt); } catch { return { error: shortError(txt || 'Non-JSON response') }; }
+    }
+
+    function bboxIoU(a, b) {
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 4 || b.length !== 4) return 0;
+      const ax1 = Number(a[0]), ay1 = Number(a[1]), ax2 = Number(a[2]), ay2 = Number(a[3]);
+      const bx1 = Number(b[0]), by1 = Number(b[1]), bx2 = Number(b[2]), by2 = Number(b[3]);
+      const x1 = Math.max(ax1, bx1);
+      const y1 = Math.max(ay1, by1);
+      const x2 = Math.min(ax2, bx2);
+      const y2 = Math.min(ay2, by2);
+      const iw = Math.max(0, x2 - x1);
+      const ih = Math.max(0, y2 - y1);
+      const inter = iw * ih;
+      const areaA = Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1);
+      const areaB = Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1);
+      const union = areaA + areaB - inter;
+      return union > 0 ? (inter / union) : 0;
+    }
+
+    function mergeSessionDefects(defects) {
+      (defects || []).forEach((item) => {
+        const label = String(item?.label || 'unknown').trim() || 'unknown';
+        const bbox = Array.isArray(item?.bbox) ? item.bbox : null;
+        if (!bbox || bbox.length !== 4) return;
+        const confidence = Number(item?.confidence || 0);
+        const model = String(item?.model || 'session').trim() || 'session';
+        const found = sessionDefects.find((existing) => (
+          existing.label.toLowerCase() === label.toLowerCase()
+          && bboxIoU(existing.bbox, bbox) >= AGGREGATE_IOU
+        ));
+        if (!found) {
+          sessionDefects.push({
+            label,
+            confidence: Number.isFinite(confidence) ? confidence : 0,
+            bbox: bbox.map((v) => Number(v)),
+            model,
+            seen_count: 1,
+          });
+          return;
+        }
+        found.confidence = Math.max(Number(found.confidence || 0), Number.isFinite(confidence) ? confidence : 0);
+        found.bbox = bbox.map((v) => Number(v));
+        found.seen_count = Number(found.seen_count || 0) + 1;
+      });
+    }
+
+    function resetSessionState() {
+      sessionFinalizing = false;
+      sessionActive = false;
+      sessionStartMs = 0;
+      sessionEndMs = 0;
+      sessionFrames = 0;
+      sessionHits = 0;
+      latestFrameBlob = null;
+      sessionDefects = [];
+      if (liveTimer) clearInterval(liveTimer);
+      if (sessionTimer) clearInterval(sessionTimer);
+      liveTimer = null;
+      sessionTimer = null;
     }
 
     function drawBoxes(defects) {
@@ -144,37 +234,203 @@
       frameCanvas.height = h;
     }
 
-    async function startLive() {
-      if (streamRef) return;
-      try {
-        streamRef = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        video.srcObject = streamRef;
-        await video.play();
+    function updateRealtimeMetrics(data, cfg) {
+      const remainingSec = Math.max(0, Math.ceil((sessionEndMs - Date.now()) / 1000));
+      liveMetrics.innerHTML = `
+        <span>PCB: <b>${cfg.pcb_name}</b></span>
+        <span>Session Left: <b>${remainingSec}s</b></span>
+        <span>Current Status: <b>${data.status}</b></span>
+        <span>Current Defects: <b>${data.defect_count}</b></span>
+        <span>Aggregated Defects: <b>${sessionDefects.length}</b></span>
+        <span>Frame Scans: <b>${sessionFrames}</b></span>
+        <span>Defect Hits: <b>${sessionHits}</b></span>
+        <span>Risk: <b>${data.risk_level}</b></span>
+        <span>Failure: <b>${data.failure_probability}%</b></span>
+        <span>Models: <b>${(data.models_used || []).join(', ')}</b></span>
+      `;
+    }
+
+    function stopStreamTracks() {
+      if (streamRef) {
+        streamRef.getTracks().forEach((t) => t.stop());
+      }
+      streamRef = null;
+    }
+
+    async function finalizeLiveSession(reason) {
+      if (!sessionActive || sessionFinalizing) return;
+      sessionFinalizing = true;
+      if (liveTimer) clearInterval(liveTimer);
+      if (sessionTimer) clearInterval(sessionTimer);
+      liveTimer = null;
+      sessionTimer = null;
+
+      const elapsedSeconds = Math.max(1, Math.min(600, Math.round((Date.now() - sessionStartMs) / 1000) || SESSION_SECONDS));
+      const cfg = getConfig();
+      cameraStatus.textContent = `Finalizing ${elapsedSeconds}s session report for ${cfg.pcb_name}...`;
+
+      if (!latestFrameBlob && streamRef) {
         syncCanvasSize();
-        if (liveTimer) clearInterval(liveTimer);
-        liveTimer = setInterval(runLiveDetection, 500);
+        frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+        latestFrameBlob = await new Promise((resolve) => frameCanvas.toBlob(resolve, 'image/jpeg', 0.82));
+      }
+
+      try {
+        if (!logToggle.checked) {
+          liveReportLink.innerHTML = '';
+          liveSessionSummary.classList.remove('hidden');
+          liveSessionSummary.textContent = `Session ended (${elapsedSeconds}s, reason: ${reason}). Report generation is turned off.`;
+          cameraStatus.textContent = `Session complete for ${cfg.pcb_name}.`;
+          return;
+        }
+        if (!latestFrameBlob) throw new Error('No frame captured for final report');
+
+        const formData = new FormData();
+        formData.append('image', latestFrameBlob, 'live_session.jpg');
+        formData.append('conf_threshold', String(cfg.conf_threshold));
+        formData.append('iou_threshold', String(cfg.iou_threshold));
+        formData.append('model_mode', cfg.model_mode);
+        formData.append('model_key', cfg.model_key);
+        formData.append('pcb_name', cfg.pcb_name);
+        formData.append('session_seconds', String(elapsedSeconds));
+        formData.append('aggregated_defects', JSON.stringify(sessionDefects));
+
+        const res = await fetch(`${apiBase}/api/live-session-report`, { method: 'POST', body: formData });
+        const data = await safeJson(res);
+        if (!res.ok) throw new Error(data.error || 'Failed to generate live session report');
+
+        drawBoxes(data.defects || sessionDefects);
+        liveMetrics.innerHTML = `
+          <span>PCB: <b>${data.pcb_name || cfg.pcb_name}</b></span>
+          <span>Session: <b>${data.session_seconds || elapsedSeconds}s</b></span>
+          <span>Status: <b>${data.status}</b></span>
+          <span>Defects: <b>${data.defect_count}</b></span>
+          <span>Risk: <b>${data.risk_level}</b></span>
+          <span>Failure: <b>${data.failure_probability}%</b></span>
+          <span>Report: <b>${data.report_generated ? 'generated' : 'failed'}</b></span>
+        `;
+        const reportUrl = data.report_url ? `${apiBase}${data.report_url}` : '';
+        liveReportLink.innerHTML = reportUrl
+          ? `<a class="btn-link" href="${reportUrl}" target="_blank">Download Live Session Report (${data.report_file || 'PDF'})</a>`
+          : '';
+        liveSessionSummary.classList.remove('hidden');
+        liveSessionSummary.textContent = JSON.stringify({
+          pcb_name: data.pcb_name || cfg.pcb_name,
+          timestamp: data.timestamp || '',
+          session_seconds: data.session_seconds || elapsedSeconds,
+          status: data.status,
+          risk_level: data.risk_level,
+          failure_probability: data.failure_probability,
+          defects: data.defects || [],
+          repairs: data.repairs || [],
+          gemini_explanation: data.gemini_explanation || '',
+        }, null, 2);
+        cameraStatus.textContent = `Session report ready for ${data.pcb_name || cfg.pcb_name}.`;
       } catch (err) {
-        alert('Camera access failed: ' + err.message);
+        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Finalization error: <b>${shortError(err.message)}</b></span>`;
+        liveReportLink.innerHTML = '';
+        liveSessionSummary.classList.remove('hidden');
+        liveSessionSummary.textContent = `Session finalization failed: ${shortError(err.message)}`;
+        cameraStatus.textContent = `Session finalization failed for ${cfg.pcb_name}.`;
+      } finally {
+        sessionActive = false;
+        sessionFinalizing = false;
+        stopStreamTracks();
       }
     }
 
-    function stopLive() {
+    async function startLive() {
+      if (streamRef) return;
+      resetSessionState();
+      liveSessionSummary.classList.add('hidden');
+      liveSessionSummary.textContent = '';
+      liveReportLink.innerHTML = '';
+
+      const attempts = [
+        { video: { facingMode: { ideal: 'environment' } }, audio: false },
+        { video: { facingMode: { ideal: 'user' } }, audio: false },
+        { video: true, audio: false },
+      ];
+      let lastErr = null;
+      for (const constraints of attempts) {
+        try {
+          streamRef = await navigator.mediaDevices.getUserMedia(constraints);
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (!streamRef) throw (lastErr || new Error('Unable to access camera'));
+
+      video.srcObject = streamRef;
+      const track = streamRef.getVideoTracks()[0];
+      if (!track || track.readyState !== 'live') {
+        throw new Error('Camera stream did not start. Close other apps using camera and retry.');
+      }
+      await video.play();
+      await new Promise((resolve) => {
+        if (video.readyState >= 2) return resolve();
+        const timer = setTimeout(resolve, 1500);
+        video.onloadeddata = () => { clearTimeout(timer); resolve(); };
+      });
+
+      syncCanvasSize();
+      sessionStartMs = Date.now();
+      sessionEndMs = sessionStartMs + (SESSION_SECONDS * 1000);
+      sessionActive = true;
       if (liveTimer) clearInterval(liveTimer);
-      liveTimer = null;
-      if (streamRef) streamRef.getTracks().forEach((t) => t.stop());
-      streamRef = null;
-      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-      liveMetrics.innerHTML = '';
+      liveTimer = setInterval(runLiveDetection, FRAME_INTERVAL_MS);
+      sessionTimer = setInterval(() => {
+        if (!sessionActive || sessionFinalizing) return;
+        const cfg = getConfig();
+        const remain = Math.max(0, Math.ceil((sessionEndMs - Date.now()) / 1000));
+        cameraStatus.textContent = `Camera connected: ${track.label || 'video device'} | Session ${cfg.pcb_name} ends in ${remain}s`;
+        if (remain <= 0) {
+          finalizeLiveSession('timeout').catch(() => {});
+        }
+      }, 1000);
+      cameraStatus.textContent = `Camera connected: ${track.label || 'video device'} | Session started (60s)`;
+    }
+
+    async function stopLive(manual = true) {
+      let finalized = false;
+      if (manual && sessionActive && !sessionFinalizing && sessionFrames > 0) {
+        await finalizeLiveSession('manual_stop');
+        finalized = true;
+      } else {
+        resetSessionState();
+        stopStreamTracks();
+      }
+      if (!finalized) {
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      }
+      if (!manual || !finalized) {
+        liveMetrics.innerHTML = '';
+        liveReportLink.innerHTML = '';
+        liveSessionSummary.classList.add('hidden');
+        liveSessionSummary.textContent = '';
+      }
+      if (!sessionActive && !sessionFinalizing && !cameraStatus.textContent.includes('report')) {
+        cameraStatus.textContent = 'Camera stopped.';
+      }
     }
 
     async function runLiveDetection() {
-      if (!streamRef || isDetecting) return;
+      if (!streamRef || isDetecting || !sessionActive || sessionFinalizing) return;
+      if (Date.now() >= sessionEndMs) {
+        await finalizeLiveSession('timeout');
+        return;
+      }
       isDetecting = true;
       try {
+        if (!frameCanvas.width || !frameCanvas.height) {
+          syncCanvasSize();
+        }
         frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
         const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, 'image/jpeg', 0.75));
         if (!blob) throw new Error('Failed to capture live frame');
 
+        latestFrameBlob = blob;
         const formData = new FormData();
         formData.append('image', blob, 'live_frame.jpg');
         const cfg = getConfig();
@@ -182,35 +438,36 @@
         formData.append('iou_threshold', String(cfg.iou_threshold));
         formData.append('model_mode', cfg.model_mode);
         formData.append('model_key', cfg.model_key);
-
-        const shouldLog = logToggle.checked && (Date.now() - lastLogAt >= 5000);
-        formData.append('log_event', shouldLog ? '1' : '0');
-        if (shouldLog) lastLogAt = Date.now();
+        formData.append('pcb_name', cfg.pcb_name);
+        formData.append('log_event', '0');
 
         const res = await fetch(`${apiBase}/api/live-detect-upload`, { method: 'POST', body: formData });
         const data = await safeJson(res);
         if (!res.ok) throw new Error(data.error || 'Live detection failed');
 
         drawBoxes(data.defects || []);
-        const logState = data.live_logged ? (data.firebase_status?.success ? 'logged' : 'local-fallback') : 'off';
-        liveMetrics.innerHTML = `
-          <span>Status: <b>${data.status}</b></span>
-          <span>Defects: <b>${data.defect_count}</b></span>
-          <span>Risk: <b>${data.risk_level}</b></span>
-          <span>Failure: <b>${data.failure_probability}%</b></span>
-          <span>Models: <b>${(data.models_used || []).join(', ')}</b></span>
-          <span>Dashboard Log: <b>${logState}</b></span>
-        `;
+        sessionFrames += 1;
+        sessionHits += Number(data.defect_count || 0);
+        mergeSessionDefects(data.defects || []);
+        updateRealtimeMetrics(data, cfg);
       } catch (err) {
-        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Live error: <b>${err.message}</b></span>`;
+        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Live error: <b>${shortError(err.message)}</b></span>`;
+        liveReportLink.innerHTML = '';
       } finally {
         isDetecting = false;
       }
     }
 
-    document.getElementById('startLiveBtn').addEventListener('click', startLive);
-    document.getElementById('stopLiveBtn').addEventListener('click', stopLive);
-    window.addEventListener('beforeunload', stopLive);
+    document.getElementById('startLiveBtn').addEventListener('click', () => {
+      startLive().catch((e) => {
+        cameraStatus.textContent = `Camera error: ${shortError(e.message)}`;
+        liveMetrics.innerHTML = `<span style="color:#ffb3b3">Camera error: <b>${shortError(e.message)}</b></span>`;
+      });
+    });
+    document.getElementById('stopLiveBtn').addEventListener('click', () => { stopLive(true).catch(() => {}); });
+    window.addEventListener('beforeunload', () => { stopLive(false).catch(() => {}); });
+    window.addEventListener('resize', syncCanvasSize);
+    video.addEventListener('loadedmetadata', syncCanvasSize);
   </script>
 </body>
 </html>

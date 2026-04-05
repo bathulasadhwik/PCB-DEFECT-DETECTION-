@@ -1,7 +1,49 @@
 # Local env and virtual env
 .venv/
-pcb_system/.env
-pcb_system/serviceAccountKey.json
-pcb_system/.env
 backend/.env
-.venv/
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Firebase
+.firebase/
+firebase-debug.log
+
+# Captures and outputs (optional - comment out if you want to keep)
+# backend/captures/
+# backend/detections/
+# backend/heatmaps/
+# backend/reports/
+
+# ML Models (if large - comment out if needed)
+# backend/yolo_model/*.pt

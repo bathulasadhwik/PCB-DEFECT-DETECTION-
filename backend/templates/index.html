@@ -31,13 +31,15 @@
     {% if model_error %}
       <div class="alert error">Model Error: {{ model_error }}</div>
     {% endif %}
-    {% if firebase_error %}
-      <div class="alert warn">Firebase: {{ firebase_error }}</div>
-    {% endif %}
 
     <section class="glass-panel">
       <h3 class="panel-title"><i class="fas fa-sliders-h"></i> Inspection Controls</h3>
       <div class="form-grid">
+        <div class="form-group">
+          <label for="pcbName"><i class="fas fa-tag"></i> PCB Name</label>
+          <input id="pcbName" type="text" maxlength="120" placeholder="Example: Mainboard Rev-A">
+          <small class="muted">Saved in logs and included in the final PDF report.</small>
+        </div>
         <div class="form-group">
           <label for="modelMode"><i class="fas fa-layer-group"></i> Inference Mode</label>
           <select id="modelMode">
@@ -111,12 +113,14 @@
       <pre id="modelInspectionText" class="output"></pre>
       <h4>Detected Defects</h4>
       <pre id="defectsText" class="output"></pre>
+      <h4>Gemini Detection Assist</h4>
+      <pre id="detectionAssistText" class="output"></pre>
       <h4>Repair Suggestions</h4>
       <pre id="repairsText" class="output"></pre>
       <h4>Explanation</h4>
       <pre id="geminiText" class="output"></pre>
       <div id="reportLinkWrap"></div>
-      <div id="firebaseStatus" class="muted"></div>
+      <div id="logStatus" class="muted"></div>
     </section>
   </main>
 
@@ -137,17 +141,28 @@
       const iou = Number(document.getElementById('iouThreshold').value);
       const modelMode = document.getElementById('modelMode').value || 'all';
       const modelKey = (document.getElementById('modelKey').value || '').trim();
+      const pcbName = (document.getElementById('pcbName').value || '').trim();
       return {
         conf_threshold: Number.isFinite(conf) ? conf : 0.25,
         iou_threshold: Number.isFinite(iou) ? iou : 0.45,
         model_mode: modelMode,
-        model_key: modelKey || 'model'
+        model_key: modelKey || 'model',
+        pcb_name: pcbName || 'Unnamed PCB',
       };
+    }
+
+    function shortError(msg) {
+      const raw = String(msg || '').replace(/\s+/g, ' ').trim();
+      if (!raw) return 'Unknown error';
+      if (raw.toLowerCase().startsWith('<!doctype html')) {
+        return 'Backend crashed while processing. Check backend terminal, then restart backend.';
+      }
+      return raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
     }
 
     async function safeJson(res) {
       const txt = await res.text();
-      try { return JSON.parse(txt); } catch { return { error: txt || 'Non-JSON response' }; }
+      try { return JSON.parse(txt); } catch { return { error: shortError(txt || 'Non-JSON response') }; }
     }
 
     async function runFullInspectFromBlob(blob) {
@@ -158,6 +173,7 @@
       formData.append('iou_threshold', String(cfg.iou_threshold));
       formData.append('model_mode', cfg.model_mode);
       formData.append('model_key', cfg.model_key);
+      formData.append('pcb_name', cfg.pcb_name);
 
       const res = await fetch(`${apiBase}/detect`, { method: 'POST', body: formData });
       const data = await safeJson(res);
@@ -171,6 +187,7 @@
         ? `<div class="verdict-badge verdict-good"><i class="fas fa-check-circle"></i> PASSED: NO DEFECTS</div>`
         : `<div class="verdict-badge verdict-bad"><i class="fas fa-times-circle"></i> FAILED: DEFECTS FOUND</div>`;
       document.getElementById('metrics').innerHTML = `
+        <span>PCB: <b>${data.pcb_name || cfg.pcb_name}</b></span>
         <span>Status: <b>${data.status}</b></span>
         <span>Risk: <b>${data.risk_level}</b></span>
         <span>Failure Probability: <b>${data.failure_probability}%</b></span>
@@ -179,6 +196,9 @@
         <span>Mode: <b>${data?.config_used?.model_mode ?? '-'}</b></span>
         <span>Model Key: <b>${data?.config_used?.model_key ?? '-'}</b></span>
         <span>Models Used: <b>${(data.models_used || []).join(', ')}</b></span>
+        <span>AI Assist: <b>${data?.detection_assist?.enabled ? 'on' : 'off'}</b></span>
+        <span>Raw Defects: <b>${data?.detection_assist?.raw_defect_count ?? (data?.raw_defects?.length ?? data?.defects?.length ?? 0)}</b></span>
+        <span>Effective Defects: <b>${data?.detection_assist?.effective_defect_count ?? (data?.defects?.length ?? 0)}</b></span>
       `;
 
       const modelCards = (data.all_models_full_results || []).map((m) => `
@@ -199,6 +219,7 @@
       document.getElementById('modelInspectionText').textContent =
         JSON.stringify(data.model_inspection_details || {}, null, 2);
       document.getElementById('defectsText').textContent = JSON.stringify(data.defects, null, 2);
+      document.getElementById('detectionAssistText').textContent = JSON.stringify(data.detection_assist || {}, null, 2);
       document.getElementById('repairsText').textContent = JSON.stringify(data.repairs, null, 2);
       document.getElementById('geminiText').textContent = data.gemini_explanation || '';
 
@@ -207,10 +228,10 @@
         ? `<a class="btn-link" href="${apiBase}/reports/${fileName}" target="_blank">Download PDF Report</a>`
         : '';
 
-      const fb = data.firebase_status || {};
-      document.getElementById('firebaseStatus').textContent = fb.success
-        ? 'Firebase log: success'
-        : `Firebase log failed: ${fb.error || 'unknown error'}`;
+      const log = data.log_status || {};
+      document.getElementById('logStatus').textContent = log.success
+        ? 'Local log: success'
+        : `Local log failed: ${log.error || 'unknown error'}`;
       runStatus.textContent = 'Inspection completed and logged.';
     }
 
@@ -251,7 +272,7 @@
         submitBtn.disabled = true;
         await runFullInspectFromBlob(imageInput.files[0]);
       } catch (err) {
-        runStatus.textContent = `Inspection failed: ${err.message}`;
+        runStatus.textContent = `Inspection failed: ${shortError(err.message)}`;
       } finally {
         submitBtn.disabled = false;
       }
