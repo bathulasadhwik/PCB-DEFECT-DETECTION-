@@ -1,2 +1,4 @@
 // API Base URL for backend server
-const API_BASE = 'https://pcb-detection-backend.onrender.com';
+window.APP_ENV = {
+  API_BASE_URL: 'https://pcb-detection-backend.onrender.com'
+};
