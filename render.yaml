@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pcb-detection-backend
+    runtime: python3
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: python backend/app.py
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: GEMINI_API_KEY
+        sync: false  # You need to set this manually
+      - key: YOLO_MODEL_KEY
+        value: model
